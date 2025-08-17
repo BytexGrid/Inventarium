@@ -16,7 +16,7 @@ function Add-AppToList {
     $cleanName = if ([string]::IsNullOrWhiteSpace($Name)) { 'Unknown' } else { $Name.Trim() }
     $cleanVersion = if ([string]::IsNullOrWhiteSpace($Version)) { 'Unknown' } else { $Version.Trim() }
     $cleanPublisher = if ([string]::IsNullOrWhiteSpace($Publisher)) { 'Unknown' } else { $Publisher.Trim() }
-    if ($cleanName -eq 'Unknown' -or $cleanVersion -eq 'Unknown') { return }
+    if ($cleanName -eq 'Unknown') { return } # We only skip if the name is unknown
     $allApps.Add([pscustomobject]@{ Name = $cleanName; Version = $cleanVersion; Publisher = $cleanPublisher; Source = $Source })
     $sourceCounts[$Source]++; $sourceCounts['Total']++
 }
@@ -31,23 +31,48 @@ try {
     }
 } catch { Write-Warning "An error occurred while querying the Registry: $($_.Exception.Message)" }
 
+# ==============================================================================
+# UPDATED WINGET SECTION (Now with user permission + improved fallback parsing)
+# ==============================================================================
 Write-Host "[2/4] Querying winget..." -ForegroundColor Yellow
 try {
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw "winget command not found." }
-    $wingetRawJsonOutput = winget list --json --disable-interactivity --accept-source-agreements 2>&1 | Out-String
-    $wingetApps = $null
-    if ($wingetRawJsonOutput -match '(?s)(\[.*\])') {
-        $cleanJson = $matches[1]
-        try { $wingetApps = $cleanJson | ConvertFrom-Json -ErrorAction Stop } catch {
-            $wingetApps = $null
-            Write-Warning "Found JSON-like text from winget, but it was invalid. Falling back to text parsing. Error: $($_.Exception.Message)"
+    $useModule = $false
+    # Check if the module is already available
+    if (Get-Module -ListAvailable -Name Microsoft.WinGet.Client) {
+        $useModule = $true
+    } else {
+        # If module is not found, ask the user for permission to install it
+        Write-Host "`n✨ A BETTER METHOD IS AVAILABLE ✨" -ForegroundColor Cyan
+        Write-Host "The official 'winget' PowerShell module provides more accurate, non-truncated app names."
+        Write-Host "It's safe, published by Microsoft, and less than 20 MB to install."
+        $choice = Read-Host "Do you want to install this module now for the best results? (y/n)"
+        
+        if ($choice -eq 'y') {
+            Write-Host "Installing the module for the current user (this may take a moment)..." -ForegroundColor Gray
+            Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -Force -Scope CurrentUser
+            $useModule = $true
+        } else {
+            Write-Host "Module installation skipped." -ForegroundColor Yellow
+            Write-Warning "Falling back to the standard command. NOTE: Application names may be truncated."
         }
     }
-    if ($wingetApps) {
-        Write-Host "  (using reliable JSON output)"
-        foreach ($app in $wingetApps) { Add-AppToList -Name $app.Name -Version $app.Version -Publisher $app.Source -Source "winget" }
+
+    if ($useModule) {
+        # Method 1: Use the superior PowerShell Module
+        Write-Host "Using the PowerShell module for winget..." -ForegroundColor Green
+        Import-Module Microsoft.WinGet.Client
+        $wingetApps = Get-WinGetPackage
+        
+        foreach ($app in $wingetApps) {
+            $publisher = 'Unknown'
+            if ($app.Id -like '*.*' -and $app.Id -notlike 'ARP*') {
+                $publisher = ($app.Id).Split('.')[0]
+            }
+            Add-AppToList -Name $app.Name -Version $app.Version -Publisher $publisher -Source "winget"
+        }
     } else {
-        Write-Host "  (JSON method failed, falling back to standard text parsing)"
+        # Method 2: Fallback to the standard command-line tool (improved parsing)
+        Write-Host "Using the fallback command-line tool for winget..." -ForegroundColor Yellow
         $wingetListOutput = winget list --disable-interactivity --accept-source-agreements | Out-String
         $lines = $wingetListOutput.Split([System.Environment]::NewLine)
         $headerLine = $lines | Select-String -Pattern 'Name\s+Id\s+Version' | Select-Object -First 1
@@ -72,10 +97,15 @@ try {
             }
             if ($sourceIndex -gt 0 -and $line.Length -gt $sourceIndex) { $publisher = $line.Substring($sourceIndex).Trim() }
             if ([string]::IsNullOrWhiteSpace($publisher)) { $publisher = 'winget' }
-            Add-AppToList -Name $name -Version $version -Publisher $publisher -Source "winget"
+            Add-AppToList -Name $name -Version $version -Publisher $publisher -Source "winget (fallback)"
         }
     }
-} catch { Write-Warning "Could not get apps from winget. Is it installed and in your PATH? Error: $($_.Exception.Message)" }
+} catch {
+    Write-Warning "An error occurred during the winget query. Error: $($_.Exception.Message)"
+}
+# ==============================================================================
+# END OF UPDATED SECTION
+# ==============================================================================
 
 Write-Host "[3/4] Querying Chocolatey..." -ForegroundColor Yellow
 try {
@@ -113,7 +143,6 @@ $finalList = $deduplicatedList | Select-Object Name, Version, Publisher, Source
 # Try Out-GridView if available
 $useGridView = $false
 try {
-    # Test if Out-GridView is available
     Get-Command Out-GridView -ErrorAction Stop | Out-Null
     $useGridView = $true
 } catch {
@@ -133,7 +162,7 @@ Write-Host "▲ SCROLL UP TO VIEW THE COMPLETE LIST ABOVE ▲" -ForegroundColor 
 Write-Host ("-" * 50) -ForegroundColor Green
 Write-Host "`n"
 Write-Host "-----------------------------------------" -ForegroundColor Green
-Write-Host "      Application Discovery Report" -ForegroundColor Green
+Write-Host "           Application Discovery Report" -ForegroundColor Green
 Write-Host "-----------------------------------------" -ForegroundColor Green
 Write-Host "Items found per source (before deduplication):"
 Write-Host "  - Registry:   $($sourceCounts.Registry)"
@@ -165,4 +194,3 @@ try {
 
 Write-Host "`nPress Enter to exit..." -ForegroundColor Cyan
 $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
- 
